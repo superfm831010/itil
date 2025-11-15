@@ -25,8 +25,10 @@ import (
 )
 
 var ShouldSkipNotify func(*ctx.Context, *models.AlertCurEvent, int64) bool
-var SendByNotifyRule func(*ctx.Context, *memsto.UserCacheType, *memsto.UserGroupCacheType, *memsto.NotifyChannelCacheType,
+var SendByNotifyRule func(*ctx.Context, *memsto.UserCacheType, *memsto.UserGroupCacheType, *memsto.NotifyChannelCacheType, *memsto.CvalCache,
 	[]*models.AlertCurEvent, int64, *models.NotifyConfig, *models.NotifyChannelConfig, *models.MessageTemplate)
+
+var EventProcessorCache *memsto.EventProcessorCacheType
 
 func init() {
 	ShouldSkipNotify = shouldSkipNotify
@@ -41,6 +43,7 @@ type Dispatch struct {
 	targetCache         *memsto.TargetCacheType
 	notifyConfigCache   *memsto.NotifyConfigCacheType
 	taskTplsCache       *memsto.TaskTplCache
+	configCvalCache     *memsto.CvalCache
 
 	notifyRuleCache      *memsto.NotifyRuleCacheType
 	notifyChannelCache   *memsto.NotifyChannelCacheType
@@ -64,7 +67,7 @@ type Dispatch struct {
 func NewDispatch(alertRuleCache *memsto.AlertRuleCacheType, userCache *memsto.UserCacheType, userGroupCache *memsto.UserGroupCacheType,
 	alertSubscribeCache *memsto.AlertSubscribeCacheType, targetCache *memsto.TargetCacheType, notifyConfigCache *memsto.NotifyConfigCacheType,
 	taskTplsCache *memsto.TaskTplCache, notifyRuleCache *memsto.NotifyRuleCacheType, notifyChannelCache *memsto.NotifyChannelCacheType,
-	messageTemplateCache *memsto.MessageTemplateCacheType, eventProcessorCache *memsto.EventProcessorCacheType, alerting aconf.Alerting, c *ctx.Context, astats *astats.Stats) *Dispatch {
+	messageTemplateCache *memsto.MessageTemplateCacheType, eventProcessorCache *memsto.EventProcessorCacheType, configCvalCache *memsto.CvalCache, alerting aconf.Alerting, c *ctx.Context, astats *astats.Stats) *Dispatch {
 	notify := &Dispatch{
 		alertRuleCache:       alertRuleCache,
 		userCache:            userCache,
@@ -77,6 +80,7 @@ func NewDispatch(alertRuleCache *memsto.AlertRuleCacheType, userCache *memsto.Us
 		notifyChannelCache:   notifyChannelCache,
 		messageTemplateCache: messageTemplateCache,
 		eventProcessorCache:  eventProcessorCache,
+		configCvalCache:      configCvalCache,
 
 		alerting: alerting,
 
@@ -90,6 +94,7 @@ func NewDispatch(alertRuleCache *memsto.AlertRuleCacheType, userCache *memsto.Us
 	}
 
 	pipeline.Init()
+	EventProcessorCache = eventProcessorCache
 
 	// 设置通知记录回调函数
 	notifyChannelCache.SetNotifyRecordFunc(sender.NotifyRecord)
@@ -177,39 +182,7 @@ func (e *Dispatch) HandleEventWithNotifyRule(eventOrigin *models.AlertCurEvent) 
 			eventCopy.NotifyRuleId = notifyRuleId
 			eventCopy.NotifyRuleName = notifyRule.Name
 
-			var processors []models.Processor
-			for _, pipelineConfig := range notifyRule.PipelineConfigs {
-				if !pipelineConfig.Enable {
-					continue
-				}
-
-				eventPipeline := e.eventProcessorCache.Get(pipelineConfig.PipelineId)
-				if eventPipeline == nil {
-					logger.Warningf("notify_id: %d, event:%+v, processor not found", notifyRuleId, eventCopy)
-					continue
-				}
-
-				if !pipelineApplicable(eventPipeline, eventCopy) {
-					logger.Debugf("notify_id: %d, event:%+v, pipeline_id: %d, not applicable", notifyRuleId, eventCopy, pipelineConfig.PipelineId)
-					continue
-				}
-
-				processors = append(processors, e.eventProcessorCache.GetProcessorsById(pipelineConfig.PipelineId)...)
-			}
-
-			for _, processor := range processors {
-				var res string
-				var err error
-				logger.Infof("before processor notify_id: %d, event:%+v, processor:%+v", notifyRuleId, eventCopy, processor)
-				eventCopy, res, err = processor.Process(e.ctx, eventCopy)
-				if eventCopy == nil {
-					logger.Warningf("after processor notify_id: %d, event:%+v, processor:%+v, event is nil", notifyRuleId, eventCopy, processor)
-					sender.NotifyRecord(e.ctx, []*models.AlertCurEvent{eventOrigin}, notifyRuleId, "", "", res, errors.New("drop by processor"))
-					break
-				}
-				logger.Infof("after processor notify_id: %d, event:%+v, processor:%+v, res:%v, err:%v", notifyRuleId, eventCopy, processor, res, err)
-			}
-
+			eventCopy = HandleEventPipeline(notifyRule.PipelineConfigs, eventOrigin, eventCopy, e.eventProcessorCache, e.ctx, notifyRuleId, "notify_rule")
 			if ShouldSkipNotify(e.ctx, eventCopy, notifyRuleId) {
 				logger.Infof("notify_id: %d, event:%+v, should skip notify", notifyRuleId, eventCopy)
 				continue
@@ -231,14 +204,14 @@ func (e *Dispatch) HandleEventWithNotifyRule(eventOrigin *models.AlertCurEvent) 
 					continue
 				}
 
-				if notifyChannel.RequestType != "flashduty" && messageTemplate == nil {
+				if notifyChannel.RequestType != "flashduty" && notifyChannel.RequestType != "pagerduty" && messageTemplate == nil {
 					logger.Warningf("notify_id: %d, channel_name: %v, event:%+v, template_id: %d, message_template not found", notifyRuleId, notifyChannel.Ident, eventCopy, notifyRule.NotifyConfigs[i].TemplateID)
 					sender.NotifyRecord(e.ctx, []*models.AlertCurEvent{eventCopy}, notifyRuleId, notifyChannel.Name, "", "", errors.New("message_template not found"))
 
 					continue
 				}
 
-				go SendByNotifyRule(e.ctx, e.userCache, e.userGroupCache, e.notifyChannelCache, []*models.AlertCurEvent{eventCopy}, notifyRuleId, &notifyRule.NotifyConfigs[i], notifyChannel, messageTemplate)
+				go SendByNotifyRule(e.ctx, e.userCache, e.userGroupCache, e.notifyChannelCache, e.configCvalCache, []*models.AlertCurEvent{eventCopy}, notifyRuleId, &notifyRule.NotifyConfigs[i], notifyChannel, messageTemplate)
 			}
 		}
 	}
@@ -257,7 +230,48 @@ func shouldSkipNotify(ctx *ctx.Context, event *models.AlertCurEvent, notifyRuleI
 	return false
 }
 
-func pipelineApplicable(pipeline *models.EventPipeline, event *models.AlertCurEvent) bool {
+func HandleEventPipeline(pipelineConfigs []models.PipelineConfig, eventOrigin, event *models.AlertCurEvent, eventProcessorCache *memsto.EventProcessorCacheType, ctx *ctx.Context, id int64, from string) *models.AlertCurEvent {
+	for _, pipelineConfig := range pipelineConfigs {
+		if !pipelineConfig.Enable {
+			continue
+		}
+
+		eventPipeline := eventProcessorCache.Get(pipelineConfig.PipelineId)
+		if eventPipeline == nil {
+			logger.Warningf("processor_by_%s_id:%d pipeline_id:%d, event pipeline not found, event: %+v", from, id, pipelineConfig.PipelineId, event)
+			continue
+		}
+
+		if !PipelineApplicable(eventPipeline, event) {
+			logger.Debugf("processor_by_%s_id:%d pipeline_id:%d, event pipeline not applicable, event: %+v", from, id, pipelineConfig.PipelineId, event)
+			continue
+		}
+
+		processors := eventProcessorCache.GetProcessorsById(pipelineConfig.PipelineId)
+		for _, processor := range processors {
+			var res string
+			var err error
+			logger.Infof("processor_by_%s_id:%d pipeline_id:%d, before processor:%+v, event: %+v", from, id, pipelineConfig.PipelineId, processor, event)
+			event, res, err = processor.Process(ctx, event)
+			if event == nil {
+				logger.Infof("processor_by_%s_id:%d pipeline_id:%d, event dropped, after processor:%+v, event: %+v", from, id, pipelineConfig.PipelineId, processor, eventOrigin)
+
+				if from == "notify_rule" {
+					// alert_rule 获取不到 eventId 记录没有意义
+					sender.NotifyRecord(ctx, []*models.AlertCurEvent{eventOrigin}, id, "", "", res, fmt.Errorf("processor_by_%s_id:%d pipeline_id:%d, drop by processor", from, id, pipelineConfig.PipelineId))
+				}
+				return nil
+			}
+			logger.Infof("processor_by_%s_id:%d pipeline_id:%d, after processor:%+v, event: %+v, res:%v, err:%v", from, id, pipelineConfig.PipelineId, processor, event, res, err)
+		}
+	}
+
+	event.FE2DB()
+	event.FillTagsMap()
+	return event
+}
+
+func PipelineApplicable(pipeline *models.EventPipeline, event *models.AlertCurEvent) bool {
 	if pipeline == nil {
 		return true
 	}
@@ -402,9 +416,10 @@ func NotifyRuleMatchCheck(notifyConfig *models.NotifyConfig, event *models.Alert
 	return nil
 }
 
-func GetNotifyConfigParams(notifyConfig *models.NotifyConfig, contactKey string, userCache *memsto.UserCacheType, userGroupCache *memsto.UserGroupCacheType) ([]string, []int64, map[string]string) {
+func GetNotifyConfigParams(notifyConfig *models.NotifyConfig, contactKey string, userCache *memsto.UserCacheType, userGroupCache *memsto.UserGroupCacheType) ([]string, []int64, []string, map[string]string) {
 	customParams := make(map[string]string)
 	var flashDutyChannelIDs []int64
+	var pagerDutyRoutingKeys []string
 	var userInfoParams models.CustomParams
 
 	for key, value := range notifyConfig.Params {
@@ -422,13 +437,26 @@ func GetNotifyConfigParams(notifyConfig *models.NotifyConfig, contactKey string,
 					}
 				}
 			}
+		case "pagerduty_integration_keys", "pagerduty_integration_ids":
+			if key == "pagerduty_integration_ids" {
+				// 不处理ids，直接跳过，这个字段只给前端标记用
+				continue
+			}
+			if data, err := json.Marshal(value); err == nil {
+				var keys []string
+				if json.Unmarshal(data, &keys) == nil {
+					pagerDutyRoutingKeys = keys
+					break
+				}
+			}
 		default:
+			// 避免直接 value.(string) 导致 panic，支持多种类型并统一为字符串
 			customParams[key] = value.(string)
 		}
 	}
 
 	if len(userInfoParams.UserIDs) == 0 && len(userInfoParams.UserGroupIDs) == 0 {
-		return []string{}, flashDutyChannelIDs, customParams
+		return []string{}, flashDutyChannelIDs, pagerDutyRoutingKeys, customParams
 	}
 
 	userIds := make([]int64, 0)
@@ -464,19 +492,20 @@ func GetNotifyConfigParams(notifyConfig *models.NotifyConfig, contactKey string,
 		visited[user.Id] = true
 	}
 
-	return sendtos, flashDutyChannelIDs, customParams
+	return sendtos, flashDutyChannelIDs, pagerDutyRoutingKeys, customParams
 }
 
-func SendNotifyRuleMessage(ctx *ctx.Context, userCache *memsto.UserCacheType, userGroupCache *memsto.UserGroupCacheType, notifyChannelCache *memsto.NotifyChannelCacheType,
+func SendNotifyRuleMessage(ctx *ctx.Context, userCache *memsto.UserCacheType, userGroupCache *memsto.UserGroupCacheType, notifyChannelCache *memsto.NotifyChannelCacheType, configCvalCache *memsto.CvalCache,
 	events []*models.AlertCurEvent, notifyRuleId int64, notifyConfig *models.NotifyConfig, notifyChannel *models.NotifyChannelConfig, messageTemplate *models.MessageTemplate) {
 	if len(events) == 0 {
 		logger.Errorf("notify_id: %d events is empty", notifyRuleId)
 		return
 	}
 
+	siteInfo := configCvalCache.GetSiteInfo()
 	tplContent := make(map[string]interface{})
 	if notifyChannel.RequestType != "flashduty" {
-		tplContent = messageTemplate.RenderEvent(events)
+		tplContent = messageTemplate.RenderEvent(events, siteInfo.SiteUrl)
 	}
 
 	var contactKey string
@@ -484,7 +513,7 @@ func SendNotifyRuleMessage(ctx *ctx.Context, userCache *memsto.UserCacheType, us
 		contactKey = notifyChannel.ParamConfig.UserInfo.ContactKey
 	}
 
-	sendtos, flashDutyChannelIDs, customParams := GetNotifyConfigParams(notifyConfig, contactKey, userCache, userGroupCache)
+	sendtos, flashDutyChannelIDs, pagerdutyRoutingKeys, customParams := GetNotifyConfigParams(notifyConfig, contactKey, userCache, userGroupCache)
 
 	switch notifyChannel.RequestType {
 	case "flashduty":
@@ -496,8 +525,17 @@ func SendNotifyRuleMessage(ctx *ctx.Context, userCache *memsto.UserCacheType, us
 			start := time.Now()
 			respBody, err := notifyChannel.SendFlashDuty(events, flashDutyChannelIDs[i], notifyChannelCache.GetHttpClient(notifyChannel.ID))
 			respBody = fmt.Sprintf("duration: %d ms %s", time.Since(start).Milliseconds(), respBody)
-			logger.Infof("notify_id: %d, channel_name: %v, event:%+v, IntegrationUrl: %v dutychannel_id: %v, respBody: %v, err: %v", notifyRuleId, notifyChannel.Name, events[0], notifyChannel.RequestConfig.FlashDutyRequestConfig.IntegrationUrl, flashDutyChannelIDs[i], respBody, err)
+			logger.Infof("duty_sender notify_id: %d, channel_name: %v, event:%+v, IntegrationUrl: %v dutychannel_id: %v, respBody: %v, err: %v", notifyRuleId, notifyChannel.Name, events[0], notifyChannel.RequestConfig.FlashDutyRequestConfig.IntegrationUrl, flashDutyChannelIDs[i], respBody, err)
 			sender.NotifyRecord(ctx, events, notifyRuleId, notifyChannel.Name, strconv.FormatInt(flashDutyChannelIDs[i], 10), respBody, err)
+		}
+
+	case "pagerduty":
+		for _, routingKey := range pagerdutyRoutingKeys {
+			start := time.Now()
+			respBody, err := notifyChannel.SendPagerDuty(events, routingKey, siteInfo.SiteUrl, notifyChannelCache.GetHttpClient(notifyChannel.ID))
+			respBody = fmt.Sprintf("duration: %d ms %s", time.Since(start).Milliseconds(), respBody)
+			logger.Infof("pagerduty_sender notify_id: %d, channel_name: %v, event:%+v, respBody: %v, err: %v", notifyRuleId, notifyChannel.Name, events[0], respBody, err)
+			sender.NotifyRecord(ctx, events, notifyRuleId, notifyChannel.Name, "", respBody, err)
 		}
 
 	case "http":
@@ -527,7 +565,7 @@ func SendNotifyRuleMessage(ctx *ctx.Context, userCache *memsto.UserCacheType, us
 		start := time.Now()
 		target, res, err := notifyChannel.SendScript(events, tplContent, customParams, sendtos)
 		res = fmt.Sprintf("duration: %d ms %s", time.Since(start).Milliseconds(), res)
-		logger.Infof("notify_id: %d, channel_name: %v, event:%+v, tplContent:%s, customParams:%v, target:%s, res:%s, err:%v", notifyRuleId, notifyChannel.Name, events[0], tplContent, customParams, target, res, err)
+		logger.Infof("script_sender notify_id: %d, channel_name: %v, event:%+v, tplContent:%s, customParams:%v, target:%s, res:%s, err:%v", notifyRuleId, notifyChannel.Name, events[0], tplContent, customParams, target, res, err)
 		sender.NotifyRecord(ctx, events, notifyRuleId, notifyChannel.Name, target, res, err)
 	default:
 		logger.Warningf("notify_id: %d, channel_name: %v, event:%+v send type not found", notifyRuleId, notifyChannel.Name, events[0])

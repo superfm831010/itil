@@ -106,6 +106,29 @@ func (e *Elasticsearch) InitClient() error {
 	options = append(options, elastic.SetHealthcheck(false))
 
 	e.Client, err = elastic.NewClient(options...)
+	if err != nil {
+		return err
+	}
+
+	if e.Client != nil {
+		for _, addr := range e.Nodes {
+			if addr == "" {
+				continue
+			}
+			if ver, verr := e.Client.ElasticsearchVersion(addr); verr == nil {
+				logger.Infof("detected elasticsearch version from %s: %s", addr, ver)
+				e.Version = ver
+				e.Addr = addr
+				break
+			} else {
+				logger.Debugf("detect version failed from %s: %v", addr, verr)
+			}
+		}
+		if e.Version == "" {
+			logger.Warning("failed to detect elasticsearch version from configured nodes, keep configured version")
+		}
+	}
+
 	return err
 }
 
@@ -183,7 +206,6 @@ func (e *Elasticsearch) MakeTSQuery(ctx context.Context, query interface{}, even
 }
 
 func (e *Elasticsearch) QueryData(ctx context.Context, queryParam interface{}) ([]models.DataResp, error) {
-
 	search := func(ctx context.Context, indices []string, source interface{}, timeout int, maxShard int) (*elastic.SearchResult, error) {
 		return e.Client.Search().
 			Index(indices...).
@@ -193,7 +215,6 @@ func (e *Elasticsearch) QueryData(ctx context.Context, queryParam interface{}) (
 			MaxConcurrentShardRequests(maxShard).
 			Do(ctx)
 	}
-
 	return eslike.QueryData(ctx, queryParam, e.Timeout, e.Version, search)
 }
 
@@ -203,9 +224,9 @@ func (e *Elasticsearch) QueryIndices() ([]string, error) {
 	return result, err
 }
 
-func (e *Elasticsearch) QueryFields(indexs []string) ([]string, error) {
+func (e *Elasticsearch) QueryFields(indexes []string) ([]string, error) {
 	var fields []string
-	result, err := elastic.NewGetFieldMappingService(e.Client).Index(indexs...).IgnoreUnavailable(true).Do(context.Background())
+	result, err := elastic.NewGetFieldMappingService(e.Client).Index(indexes...).IgnoreUnavailable(true).Do(context.Background())
 	if err != nil {
 		return fields, err
 	}
@@ -223,7 +244,7 @@ func (e *Elasticsearch) QueryFields(indexs []string) ([]string, error) {
 							continue
 						}
 
-						if _, exsits := fieldMap[kk]; !exsits {
+						if _, exists := fieldMap[kk]; !exists {
 							fieldMap[kk] = struct{}{}
 							fields = append(fields, kk)
 						}
@@ -235,7 +256,7 @@ func (e *Elasticsearch) QueryFields(indexs []string) ([]string, error) {
 						continue
 					}
 
-					if _, exsits := fieldMap[k]; !exsits {
+					if _, exists := fieldMap[k]; !exists {
 						fieldMap[k] = struct{}{}
 						fields = append(fields, k)
 					}
@@ -275,11 +296,11 @@ func (e *Elasticsearch) QueryLog(ctx context.Context, queryParam interface{}) ([
 	return eslike.QueryLog(ctx, queryParam, e.Timeout, e.Version, e.MaxShard, search)
 }
 
-func (e *Elasticsearch) QueryFieldValue(indexs []string, field string, query string) ([]string, error) {
+func (e *Elasticsearch) QueryFieldValue(indexes []string, field string, query string) ([]string, error) {
 	var values []string
 	search := e.Client.Search().
 		IgnoreUnavailable(true).
-		Index(indexs...).
+		Index(indexes...).
 		Size(0)
 
 	if query != "" {

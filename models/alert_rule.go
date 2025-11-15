@@ -65,7 +65,7 @@ type AlertRule struct {
 	DatasourceIds         string                 `json:"-" gorm:"datasource_ids"`
 	DatasourceIdsJson     []int64                `json:"datasource_ids,omitempty" gorm:"-"`                                      // alert rule list page use this field
 	DatasourceQueries     []DatasourceQuery      `json:"datasource_queries" gorm:"datasource_queries;type:text;serializer:json"` // datasource queries
-	Cluster               string                 `json:"cluster"`                                                                // take effect by clusters, seperated by space
+	Cluster               string                 `json:"cluster"`                                                                // take effect by clusters, separated by space
 	Name                  string                 `json:"name"`                                                                   // rule name
 	Note                  string                 `json:"note"`                                                                   // will sent in notify
 	Prod                  string                 `json:"prod"`                                                                   // product empty means n9e
@@ -119,6 +119,7 @@ type AlertRule struct {
 	UpdateByNickname      string                 `json:"update_by_nickname" gorm:"-"` // for fe
 	CronPattern           string                 `json:"cron_pattern"`
 	NotifyRuleIds         []int64                `json:"notify_rule_ids" gorm:"serializer:json"`
+	PipelineConfigs       []PipelineConfig       `json:"pipeline_configs" gorm:"serializer:json"`
 	NotifyVersion         int                    `json:"notify_version"` // 0: old, 1: new
 }
 

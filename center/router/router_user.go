@@ -235,6 +235,16 @@ func (rt *Router) userDel(c *gin.Context) {
 		return
 	}
 
+	// 如果要删除的用户是 admin 角色，检查是否是最后一个 admin
+	if target.IsAdmin() {
+		adminCount, err := models.CountAdminUsers(rt.Ctx)
+		ginx.Dangerous(err)
+
+		if adminCount <= 1 {
+			ginx.Bomb(http.StatusBadRequest, "Cannot delete the last admin user")
+		}
+	}
+
 	ginx.NewRender(c).Message(target.Del(rt.Ctx))
 }
 
@@ -343,6 +353,16 @@ func (rt *Router) usersPhoneEncrypt(c *gin.Context) {
 		"success_count": successCount,
 		"fail_count":    failCount,
 	}, nil)
+}
+
+func (rt *Router) usersPhoneDecryptRefresh(c *gin.Context) {
+	err := models.RefreshPhoneEncryptionCache(rt.Ctx)
+	if err != nil {
+		ginx.NewRender(c).Message(fmt.Errorf("refresh phone encryption cache failed: %v", err))
+		return
+	}
+
+	ginx.NewRender(c).Message(nil)
 }
 
 // usersPhoneDecrypt 统一手机号解密

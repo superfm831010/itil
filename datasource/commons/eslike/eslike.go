@@ -84,9 +84,9 @@ type QueryFieldsFunc func(indices []string) ([]string, error)
 type GroupByCate string
 
 const (
-	Filters  GroupByCate = "filters"
-	Histgram GroupByCate = "histgram"
-	Terms    GroupByCate = "terms"
+	Filters   GroupByCate = "filters"
+	Histogram GroupByCate = "histogram"
+	Terms     GroupByCate = "terms"
 )
 
 // 参数
@@ -178,7 +178,7 @@ func getUnixTs(timeStr string) int64 {
 	return parsedTime.UnixMilli()
 }
 
-func GetBuckts(labelKey string, keys []string, arr []interface{}, metrics *MetricPtr, labels string, ts int64, f string) {
+func GetBuckets(labelKey string, keys []string, arr []interface{}, metrics *MetricPtr, labels string, ts int64, f string) {
 	var err error
 	bucketsKey := ""
 	if len(keys) > 0 {
@@ -226,9 +226,9 @@ func GetBuckts(labelKey string, keys []string, arr []interface{}, metrics *Metri
 		nextBucketsArr, exists := innerBuckets.(map[string]interface{})["buckets"]
 		if exists {
 			if len(keys[1:]) >= 1 {
-				GetBuckts(bucketsKey, keys[1:], nextBucketsArr.([]interface{}), metrics, newlabels, ts, f)
+				GetBuckets(bucketsKey, keys[1:], nextBucketsArr.([]interface{}), metrics, newlabels, ts, f)
 			} else {
-				GetBuckts(bucketsKey, []string{}, nextBucketsArr.([]interface{}), metrics, newlabels, ts, f)
+				GetBuckets(bucketsKey, []string{}, nextBucketsArr.([]interface{}), metrics, newlabels, ts, f)
 			}
 		} else {
 
@@ -405,7 +405,7 @@ func QueryData(ctx context.Context, queryParam interface{}, cliTimeout int64, ve
 	}
 
 	q.Gte(time.Unix(start, 0).UnixMilli())
-	q.Lte(time.Unix(end, 0).UnixMilli())
+	q.Lt(time.Unix(end, 0).UnixMilli())
 	q.Format("epoch_millis")
 
 	field := param.MetricAggr.Field
@@ -441,10 +441,32 @@ func QueryData(ctx context.Context, queryParam interface{}, cliTimeout int64, ve
 		Field(param.DateField).
 		MinDocCount(1)
 
-	if strings.HasPrefix(version, "7") {
+	versionParts := strings.Split(version, ".")
+	major := 0
+	if len(versionParts) > 0 {
+		if m, err := strconv.Atoi(versionParts[0]); err == nil {
+			major = m
+		}
+	}
+	minor := 0
+	if len(versionParts) > 1 {
+		if m, err := strconv.Atoi(versionParts[1]); err == nil {
+			minor = m
+		}
+	}
+
+	if major >= 7 {
 		// 添加偏移量，使第一个分桶bucket的左边界对齐为 start 时间
 		offset := (start % param.Interval) - param.Interval
-		tsAggr.FixedInterval(fmt.Sprintf("%ds", param.Interval)).Offset(fmt.Sprintf("%ds", offset))
+
+		// 使用 fixed_interval 的条件：ES 7.2+ 或者任何 major > 7（例如 ES8）
+		if (major > 7) || (major == 7 && minor >= 2) {
+			// ES 7.2+ 以及 ES8+ 使用 fixed_interval
+			tsAggr.FixedInterval(fmt.Sprintf("%ds", param.Interval)).Offset(fmt.Sprintf("%ds", offset))
+		} else {
+			// 7.0-7.1 使用 interval（带 offset）
+			tsAggr.Interval(fmt.Sprintf("%ds", param.Interval)).Offset(fmt.Sprintf("%ds", offset))
+		}
 	} else {
 		// 兼容 7.0 以下的版本
 		// OpenSearch 也使用这个字段
@@ -471,7 +493,7 @@ func QueryData(ctx context.Context, queryParam interface{}, cliTimeout int64, ve
 			} else {
 				groupByAggregation = elastic.NewTermsAggregation().Field(groupBy.Field).OrderByKeyDesc().Size(groupBy.Size).MinDocCount(int(groupBy.MinDocCount))
 			}
-		case Histgram:
+		case Histogram:
 			if param.MetricAggr.Func != "count" {
 				groupByAggregation = elastic.NewHistogramAggregation().Field(groupBy.Field).Interval(float64(groupBy.Interval)).SubAggregation(field, aggr)
 			} else {
@@ -501,7 +523,7 @@ func QueryData(ctx context.Context, queryParam interface{}, cliTimeout int64, ve
 			switch groupBy.Cate {
 			case Terms:
 				groupByAggregation = elastic.NewTermsAggregation().Field(groupBy.Field).SubAggregation(groupBys[i-1].Field, groupByAggregation).OrderByKeyDesc().Size(groupBy.Size).MinDocCount(int(groupBy.MinDocCount))
-			case Histgram:
+			case Histogram:
 				groupByAggregation = elastic.NewHistogramAggregation().Field(groupBy.Field).Interval(float64(groupBy.Interval)).SubAggregation(groupBys[i-1].Field, groupByAggregation)
 			case Filters:
 				for _, filterParam := range groupBy.Params {
@@ -562,7 +584,7 @@ func QueryData(ctx context.Context, queryParam interface{}, cliTimeout int64, ve
 
 	metrics := &MetricPtr{Data: make(map[string][][]float64)}
 
-	GetBuckts("", keys, bucketsData, metrics, "", 0, param.MetricAggr.Func)
+	GetBuckets("", keys, bucketsData, metrics, "", 0, param.MetricAggr.Func)
 
 	items, err := TransferData(fmt.Sprintf("%s_%s", field, param.MetricAggr.Func), param.Ref, metrics.Data), nil
 
@@ -610,8 +632,8 @@ func QueryLog(ctx context.Context, queryParam interface{}, timeout int64, versio
 	now := time.Now().Unix()
 	var start, end int64
 	if param.End != 0 && param.Start != 0 {
-		end = param.End - param.End%param.Interval
-		start = param.Start - param.Start%param.Interval
+		end = param.End
+		start = param.Start
 	} else {
 		end = now
 		start = end - param.Interval
@@ -619,7 +641,7 @@ func QueryLog(ctx context.Context, queryParam interface{}, timeout int64, versio
 
 	q := elastic.NewRangeQuery(param.DateField)
 	q.Gte(time.Unix(start, 0).UnixMilli())
-	q.Lte(time.Unix(end, 0).UnixMilli())
+	q.Lt(time.Unix(end, 0).UnixMilli())
 	q.Format("epoch_millis")
 
 	queryString := GetQueryString(param.Filter, q)
@@ -673,7 +695,7 @@ func QueryLog(ctx context.Context, queryParam interface{}, timeout int64, versio
 			var x map[string]interface{}
 			err := json.Unmarshal(result.Hits.Hits[i].Source, &x)
 			if err != nil {
-				logger.Warningf("Unmarshal soruce error:%v", err)
+				logger.Warningf("Unmarshal source error:%v", err)
 				continue
 			}
 
