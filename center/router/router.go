@@ -129,6 +129,13 @@ func (rt *Router) configNoRoute(r *gin.Engine, fs *http.FileSystem) {
 
 		switch suffix {
 		case "png", "jpeg", "jpg", "svg", "ico", "gif", "css", "js", "html", "htm", "gz", "zip", "map", "ttf", "md":
+			// 禁止浏览器缓存图标文件，确保每次都获取最新版本
+			if suffix == "ico" || suffix == "svg" || suffix == "png" {
+				c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+				c.Header("Pragma", "no-cache")
+				c.Header("Expires", "0")
+			}
+
 			if !rt.Center.UseFileAssets {
 				c.FileFromFS(c.Request.URL.Path, *fs)
 			} else {

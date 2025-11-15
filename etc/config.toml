@@ -77,11 +77,11 @@ OpenRSA = false
 
 [DB]
 # mysql postgres sqlite
-DBType = "sqlite"
+DBType = "mysql"
 # postgres: host=%s port=%s user=%s dbname=%s password=%s sslmode=%s
 # postgres: DSN="host=127.0.0.1 port=5432 user=root dbname=n9e_v6 password=1234 sslmode=disable"
 # mysql: DSN="root:1234@tcp(localhost:3306)/n9e_v6?charset=utf8mb4&parseTime=True&loc=Local"
-DSN = "n9e.db"
+DSN = "root:DataEase@2024@tcp(127.0.0.1:13306)/n9e_v6?charset=utf8mb4&parseTime=True&loc=Local"
 # enable debug mode or not
 Debug = false
 # unit: s
@@ -122,6 +122,8 @@ EngineName = "default"
 [Center]
 MetricsYamlFile = "./etc/metrics.yaml"
 I18NHeaderKey = "X-Language"
+# 使用文件系统模式读取前端资源，而非嵌入式资源，便于动态更新图标
+UseFileAssets = true
 
 [Center.AnonymousAccess]
 PromQuerier = true
@@ -140,9 +142,10 @@ ForceUseServerTS = true
 # QueueMaxSize = 1000000
 # QueuePopSize = 1000
 
-[[Pushgw.Writers]] 
+[[Pushgw.Writers]]
 # Url = "http://127.0.0.1:8480/insert/0/prometheus/api/v1/write"
-Url = "http://127.0.0.1:9090/api/v1/write"
+# Url = "http://127.0.0.1:9090/api/v1/write"
+Url = "http://192.168.31.10:8428/api/v1/write"
 # Basic auth username
 BasicAuthUser = ""
 # Basic auth password
